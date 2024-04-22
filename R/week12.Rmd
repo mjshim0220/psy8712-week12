@@ -13,10 +13,14 @@ setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 library(RedditExtractoR)
 library(tidyverse)
 library(tm)
-library(tidytext)
 library(textstem)
-library(qdap)
-library(rJava)
+library(qdap)#FWI) I had an issue with installing qdap.After I deleted and reinstalled the latest Java, I can call the package successfully "https://www.java.com/en/download/manual.jsp" 
+library(RWeka)
+library(ldatuning)
+library(topicmodels)
+library(tidytext)
+library(wordcloud)
+library(caret)
 ```
 
 #Data Import and Cleaning
@@ -53,7 +57,137 @@ io_corpus <- io_corpus_original %>%
   tm_map(removeNumbers) %>%
   tm_map(removePunctuation) %>% 
   tm_map(removeWords, stopwords("en")) %>% 
-  tm_map(stripWhitespace) %>% 
-  tm_map(removeWords, c("io", "i/o", "iopsy", "iopsych", "io psy", "io psychology", "industrial organizaational pychology"))
-                              
+  tm_map(removeWords, c("io", "i/o", "iopsy", "iopsych", "io psy", "io psychology", "industrial organizaational pychology","iop", "psychology", "riopsychology", "psych")) %>% 
+  tm_map(stripWhitespace)
+                        
+#Compare randomly selected two corpus
+compare_them <- function(corpus1, corpus2) {
+  index <- sample(length(corpus1), 1)
+  cat("Content from Corpus 1:\n", content(corpus1[[index]]), "\n")
+  cat("Content from Corpus 2:\n", content(corpus2[[index]]), "\n")
+}
+
+compare_them(io_corpus_original, io_corpus)
 ```
+
+```{r dtm}
+myTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 1, max = 2))
+io_dtm <- DocumentTermMatrix(io_corpus, control = list(tokenize = myTokenizer))
+io_slim_dtm <- removeSparseTerms(io_dtm, sparse = 0.997)
+io_slim_matrix <- as.matrix(io_slim_dtm)
+non_zero_rows <- rowSums(io_slim_matrix != 0) > 0
+io_dtm <- io_slim_matrix[non_zero_rows, ]
+```
+
+```{r lda}
+#find the topic number
+dtm_tune<-FindTopicsNumber(
+  io_dtm,
+  topics = seq(2, 10, 1),
+  metrics = c(
+    "Griffiths2004",
+    "CaoJuan2009",
+    "Arun2010",
+    "Deveaud2014"),
+  verbose = TRUE
+  )
+FindTopicsNumber_plot(dtm_tune)
+lda<-LDA(io_dtm, 6) #Based on the plot 6 is the ideal number of topic
+
+#create a beta matrix
+lda_beta <- tidy(lda, matrix = "beta") %>%
+  group_by(topic) %>%
+  top_n(20, beta) %>%
+  arrange(topic, -beta) %>% 
+  print()
+
+lda_gammas <- tidy(lda, matrix = "gamma") %>% 
+  group_by(document) %>%
+  top_n(1, gamma) %>%
+  slice(1) %>%
+  ungroup %>%
+  mutate(document = as.numeric(document)) %>%
+  arrange(document) %>% 
+  print()
+
+#Create a tibble topics_tbl
+doc_ids <- as.integer(rownames(io_dtm))
+lda_gammas$doc_id <- doc_ids[lda_gammas$document]
+topics_tbl <- data.frame(doc_id = lda_gammas$doc_id,
+                         original = week12_tbl$title[lda_gammas$doc_id],
+                         topic = lda_gammas$topic,
+                         probability = lda_gammas$gamma)
+topics_tbl$topic <- topics_tbl$topic + 1
+view(topics_tbl)
+print(lda_beta)
+```
+
+#Response Q1-2
+1.Using the beta matrix alone, what topics would you conclude your final topic list maps onto? (e.g., topic 1, 2, 3…n each reflect what substantive topic construct? Use your best judgment.)
+* Based on the beta matrix, I will label topic 1 - master program, topic 2- career path (academic). topic 3 - Research (people analytics), topic 4 - Job analysis and discussion, topic 5 - qualification for job, topic 6 - Survey data
+
+2.Look at the original text of documents with the highest and lowest probabilities assigned to each document. Do your topic names derived from your interpretation of the beta matrix conceptually match with the content of the original posts? What kind of validity evidence does your answer to this question represent?
+* When I compare the documents with the highest and lowest probabilities assigned to each document, beta matrix does not conceptually well matched with the content of the original posts. I believe Beta value represents the construct validity but less represents the content validity.
+
+#Wordcloud
+The word cloud is generated from the word frequencies within the documents. In the Reddit IOpsychology subcategories, the terms "job," "career," and "research" appear most frequently.
+```{r wcloud}
+word_df<-io_dtm %>% 
+  as.matrix %>% 
+  as_tibble
+
+wordcloud(
+  words = names(word_df),
+  freq = colSums(word_df),
+  max.words = 50,
+  colors = brewer.pal(9, "Blues")
+)
+```
+
+```{r fin_tbl}
+week12_tbl$doc_id <- seq_len(nrow(week12_tbl))
+final_tbl <- left_join(topics_tbl, week12_tbl, by = "doc_id") %>% 
+  rename(upvote_counts = upvotes) %>% 
+  na.omit()
+
+head(final_tbl)
+```
+
+#Test if the upvotes counts are differed by topics
+##1)Statistical analysis
+```{r s_test}
+anova <- aov(upvote_counts ~ topic, data = final_tbl) #statistical analysis to determine if upvotes differs by topic
+summary(anova)
+```
+There is no sifnificant different in upvotes counts based on the topics.
+
+##2)Machine learning analysis
+```{r m_test}
+#Split the data into training and testing sets
+set.seed(0220)
+train_index <- createDataPartition(final_tbl$upvote_counts, p = 0.8, list = FALSE)
+train_data <- final_tbl[train_index, ]
+test_data <- final_tbl[-train_index, ]
+
+#Train the random forest model with cross-validation
+rf_model <- train(
+  upvote_counts ~ topic,
+  data = train_data,
+  method = "ranger",
+  na.action = na.pass,
+  tuneLength = 1,
+  trControl = trainControl(method = "cv", 
+                           number = 10)
+)
+
+#Print cross-validated performance metrics
+print(rf_model)
+
+#Make predictions on the holdout data
+holdout_predictions <- predict(rf_model, newdata = test_data)
+
+#Calculate additional performance metrics for holdout predictions
+holdout_performance <- postResample(pred = holdout_predictions, obs = test_data$upvote_counts)
+print(holdout_performance)
+```
+Based on the results, the holdout predictions' RMSE, Rsquared, and MAE indices are higher than CV results. The holdout prediction result is worse than its average performance during the cross-validation.
