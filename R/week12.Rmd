@@ -1,0 +1,59 @@
+---
+title: "week12"
+author: "MJ Shim"
+date: "2024-04-22"
+output: html_document
+---
+
+#Script Settings and Resources
+
+```{r setup, include=FALSE}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+library(RedditExtractoR)
+library(tidyverse)
+library(tm)
+library(tidytext)
+library(textstem)
+library(qdap)
+library(rJava)
+```
+
+#Data Import and Cleaning
+
+```{r df}
+#extract titles and upvotes
+# reddit_thread_urls <- find_thread_urls(
+#   subreddit = "IOPsychology",
+#   sort_by = "new",
+#   period = "year") %>%
+#   mutate(date_utc = ymd(date_utc))
+# thread_urls2 <- filter(reddit_thread_urls, timestamp > as.numeric(as.POSIXct(Sys.Date() - 365)))
+# 
+# reddit_content <- get_thread_content(thread_urls2$url)
+# 
+# title<-reddit_content$thread$title
+# upvotes<-reddit_content$thread$upvotes
+# 
+# #create a week12_tbl
+# week12_tbl<-tibble(title, upvotes)
+# 
+# #save csv file
+# write_csv(week12_tbl, "../data/week12_tbl.csv")
+```
+
+```{r corpus}
+week12_tbl<-read_csv("../data/week12_tbl.csv")
+io_corpus_original <- VCorpus(VectorSource(week12_tbl$title))
+
+io_corpus <- io_corpus_original %>%
+  tm_map(content_transformer(replace_abbreviation)) %>%
+  tm_map(content_transformer(replace_contraction)) %>%
+  tm_map(content_transformer(str_to_lower)) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removePunctuation) %>% 
+  tm_map(removeWords, stopwords("en")) %>% 
+  tm_map(stripWhitespace) %>% 
+  tm_map(removeWords, c("io", "i/o", "iopsy", "iopsych", "io psy", "io psychology", "industrial organizaational pychology"))
+                              
+```
